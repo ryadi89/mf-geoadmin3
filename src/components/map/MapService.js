@@ -662,6 +662,28 @@
           }
         };
 
+        // TODO Remove me
+        var addGeojsonLayer = function(layers) {
+          layers.fcst = {
+            geojsonUrl: 'components/map/temp/fcst.geojson',
+            opacity: 1,
+            attribution: 'OFEV',
+            background: false,
+            seachable: false,
+            selectbyrectangle: false,
+            attributionUrl: 'http://www.bafu.admin.ch/index.html?lang=fr',
+            topics: 'dev',
+            label: 'FCST',
+            highlightable: false,
+            chargeable: false,
+            hasLegend: false,
+            type: 'geojson',
+            timeEnabled: false,
+            queryable: false
+          };
+          return layers;
+        };
+
         /**
          * Load layers for a given topic and language. Return a promise.
          */
@@ -670,6 +692,8 @@
 
           var promise = $http.get(url).then(function(response) {
             layers = response.data;
+            // TODO Remove me
+            layers = addGeojsonLayer(layers);
           }, function(response) {
             layers = undefined;
           });
@@ -808,6 +832,13 @@
               opacity: layer.opacity || 1,
               attribution: layer.attribution,
               layers: subLayers
+            });
+          } else if (layer.type == 'geojson') {
+            var olSource = new ol.source.GeoJSON({
+              url: layer.geojsonUrl
+            });
+            olLayer = new ol.layer.Vector({
+              source: olSource
             });
           }
           if (angular.isDefined(olLayer)) {
