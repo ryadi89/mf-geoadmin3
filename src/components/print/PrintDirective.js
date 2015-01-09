@@ -9,7 +9,7 @@
 
   module.controller('GaPrintDirectiveController', function($rootScope, $scope,
       $http, $window, $translate, $timeout,
-      gaLayers, gaPermalink, gaBrowserSniffer, gaWaitCursor) {
+      gaLayers, gaMapUtils, gaPermalink, gaBrowserSniffer, gaWaitCursor) {
 
     var pdfLegendsToDownload = [];
     var pdfLegendString = '_big.pdf';
@@ -564,6 +564,21 @@
       }
     };
 
+    var getZoomFromScale = function(scale) {
+      var diff, i, len;
+      var minDiff = Number.POSITIVE_INFINITY;
+      var resolution = scale / UNITS_RATIO / POINTS_PER_INCH;
+      var resolutions = gaMapUtils.viewResolutions;
+      for (i = 0, len = resolutions.length; i < len; i++) {
+        if (resolutions[i] < resolution) {
+          break;
+        }
+      }
+      var zoom = Math.max(0, i - 1);
+
+      return zoom;
+    };
+
     var getNearestScale = function(target, scales) {
       var nearest = null;
       angular.forEach(scales, function(scale) {
@@ -603,6 +618,8 @@
       defaultPage['lang' + lang] = true;
       var qrcodeUrl = $scope.options.qrcodeUrl +
           encodeURIComponent(gaPermalink.getHref());
+      var print_zoom = getZoomFromScale($scope.scale.value);
+      qrcodeUrl = qrcodeUrl.replace(/zoom%3D(\d{1,2})/, 'zoom%3D' + print_zoom);
       var encLayers = [];
       var encLegends;
       var attributions = [];
