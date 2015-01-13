@@ -37,40 +37,6 @@
           Math.pow(a[0] - origin[0], 2));
     };
 
-    // Defines if a layer is cacheable at a specific data zoom level.
-    var isCacheableLayer = function(layer, z) {
-      if (layer.getSource() instanceof ol.source.TileImage) {
-        var resolutions = layer.getSource().getTileGrid().getResolutions();
-        var max = layer.getMaxResolution() || resolutions[0];
-        if (!z && max > minRes) {
-          return true;
-        }
-        var min = layer.getMinResolution() ||
-            resolutions[resolutions.length - 1];
-        var curr = resolutions[z];
-        if (curr && max > curr && curr >= min) {
-          return true;
-        }
-      }
-      return false;
-    };
-
-
-    // Get cacheable layers of a map.
-    var getCacheableLayers = function(layers) {
-      var cache = [];
-      for (var i = 0, ii = layers.length; i < ii; i++) {
-        var layer = layers[i];
-        if (layer instanceof ol.layer.Group) {
-          cache = cache.concat(
-              getCacheableLayers(layer.getLayers().getArray()));
-        } else if (isCacheableLayer(layer)) {
-          cache.push(layer);
-        }
-      }
-      return cache;
-    };
-
     var extent;
     var isDownloading;
     var isStorageFull;
@@ -97,9 +63,54 @@
     initDownloadStatus();
 
 
-    this.$get = function($rootScope, $timeout, $translate, $window,
-        gaBrowserSniffer, gaGlobalOptions, gaLayers, gaMapUtils,
+    this.$get = function($http, $rootScope, $timeout, $translate, $window,
+        gaBrowserSniffer, gaGlobalOptions, gaKml, gaLayers, gaMapUtils,
         gaStorage, gaStyleFactory, gaUrlUtils) {
+
+      // Defines if a layer is cacheable at a specific data zoom level.
+      var isCacheableLayer = function(layer, z) {
+        if (layer.getSource() instanceof ol.source.TileImage) {
+          var resolutions = layer.getSource().getTileGrid().getResolutions();
+          var max = layer.getMaxResolution() || resolutions[0];
+          if (!z && max > minRes) {
+            return true;
+          }
+          var min = layer.getMinResolution() ||
+              resolutions[resolutions.length - 1];
+          var curr = resolutions[z];
+          if (curr && max > curr && curr >= min) {
+            return true;
+          }
+        } else if (gaKml.isKmlLayer(layer)) {
+          if (layer instanceof ol.layer.Image) {
+            alert($translate.instant('kml_too_big_to_save') + ': ' +
+                layer.label);
+          } else {
+            return true;
+          }
+        } else {
+          alert($translate.instant('layer_type_cant_be_save') + ': ' +
+              layer.label);
+        }
+        return false;
+      };
+
+
+      // Get cacheable layers of a map.
+      var getCacheableLayers = function(layers) {
+        var cache = [];
+        for (var i = 0, ii = layers.length; i < ii; i++) {
+          var layer = layers[i];
+          if (layer instanceof ol.layer.Group) {
+            cache = cache.concat(
+                getCacheableLayers(layer.getLayers().getArray()));
+          } else if (isCacheableLayer(layer)) {
+            cache.push(layer);
+          }
+        }
+        return cache;
+      };
+
       minRes = gaMapUtils.getViewResolutionForZoom(maxZoom);
       featureOverlay.setStyle(gaStyleFactory.getStyle('offline'));
 
@@ -191,7 +202,7 @@
         fileReader.readAsDataURL(blob);
       };
 
-      var Offline = function() {
+      var Offline = function(proxyUrl) {
         this.hasData = function(map) {
           return !!(gaStorage.getItem(extentKey));
         };
@@ -204,6 +215,9 @@
           var layersIds = gaStorage.getItem(layersKey);
           for (var i = 0, ii = layers.length; i < ii; i++) {
             var layer = layers[i];
+            if (gaKml.isKmlLayer(layer)) {
+              continue;
+            }
             if (layer instanceof ol.layer.Group) {
              var hasCachedLayer = false;
              layer.getLayers().forEach(function(item) {
@@ -347,11 +361,21 @@
           for (var j = 0, jj = requests.length; j < jj; j++) {
             requests[j].abort();
           }
+
+          // Clear tiles database
           gaStorage.clearTiles(function(err) {
+
             if (err) {
               alert($translate.instant('offline_clear_db_error'));
             } else {
               initDownloadStatus();
+
+              // Remove specific property of layers (currently only KML layers)
+              var layersId = gaStorage.getItem(layersKey).split(',');
+              for (var j = 0, jj = layersId.length; j < jj; j++) {
+                gaStorage.removeItem(layersId[j]);
+              }
+
               gaStorage.removeItem(extentKey);
               gaStorage.removeItem(layersKey);
               gaStorage.removeItem(opacityKey);
@@ -364,7 +388,8 @@
         this.save = function(map) {
 
           // Get the cacheable layers
-          var layers = getCacheableLayers(map.getLayers().getArray());
+          var layers = getCacheableLayers(map.getLayers().getArray(),
+              $translate);
           if (layers.length == 0) {
             alert($translate.instant('offline_no_cacheable_layers'));
             return;
@@ -394,6 +419,18 @@
             var layer = layers[i];
             layersIds.push(layer.id);
             layersOpacity.push(layer.invertedOpacity);
+
+            // if the layer is a KML
+            if (gaKml.isKmlLayer(layer) && /http/.test(layer.url)) {
+              $http.get(proxyUrl + encodeURIComponent(layer.url))
+                .success(function(data) {
+                  gaStorage.setItem(layer.id, data);
+                });
+              continue;
+            }
+
+            // if it's a tiled layer (WMTS or WMS) prepare the list of tiles to
+            // download
             var parentLayerId = gaLayers.getLayerProperty(layer.bodId,
                 'parentLayerId');
             var isBgLayer = (parentLayerId) ?
@@ -456,6 +493,13 @@
           gaStorage.setItem(layersKey, layersIds.join(','));
           gaStorage.setItem(opacityKey, layersOpacity.join(','));
           gaStorage.setItem(bgKey, layersBg.join(','));
+
+          // Nothing to save or only KML layers
+          if (queue.length == 0) {
+            alert($translate.instant('offline_not_enough_layer'));
+            this.abort();
+            return;
+          }
 
           // On mobile we simulate synchronous tile downloading, because when
           // saving multilayers and/or layers with big size tile, browser is
@@ -551,7 +595,7 @@
           gaStorage.init();
         }
       };
-      return new Offline();
+      return new Offline(gaGlobalOptions.ogcproxyUrl);
     };
   });
 })();

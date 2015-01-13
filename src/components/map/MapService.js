@@ -406,7 +406,8 @@
     };
 
     this.$get = function($http, gaDefinePropertiesForLayer, gaMapClick,
-        gaMapUtils, gaGlobalOptions, $rootScope, $translate, gaStyleFactory) {
+        gaMapUtils, gaGlobalOptions, $rootScope, $translate, gaStyleFactory,
+        gaStorage, gaNetworkStatus) {
       // Create the parser
       var kmlFormat = new ol.format.KML({
         extractStyles: true,
@@ -418,8 +419,20 @@
          * Create a KML layer from a KML string
          */
         var createKmlLayer = function(kml, options) {
-          var olLayer;
           options = options || {};
+          options.id = 'KML||' + options.url;
+
+          // Update data stored for offline or use it if kml is null
+          var offlineData = gaStorage.getItem(options.id);
+          if (offlineData) {
+            if (kml) {
+              gaStorage.setItem(options.id, kml);
+            } else {
+              kml = offlineData;
+            }
+          } else if (!kml) {
+            return;
+          }
 
           // Replace all hrefs to prevent errors if image doesn't have
           // CORS headers. Exception for google markers icons (lightblue.png,
@@ -452,32 +465,66 @@
               feature.getGeometry().transform('EPSG:4326', options.projection);
             }
 
+            var styles = feature.getStyleFunction().call(feature);
+            var style = styles[0];
+            var image = style.getImage();
+            var geom = feature.getGeometry();
+
+            // We detect if the feature contains a point geometry
+            var hasPointGeometry = (geom instanceof ol.geom.Point ||
+              geom instanceof ol.geom.MultiPoint);
+            if (geom instanceof ol.geom.GeometryCollection) {
+              var geoms = geom.getGeometries();
+              for (var j = 0, jj = geoms.length; j < jj; j++) {
+                if (geoms[i] instanceof ol.geom.Point ||
+                    geoms[i] instanceof ol.geom.MultiPoint) {
+                  hasPointGeometry = true;
+                  break;
+                }
+              }
+            }
+
             // if the feature has a name, display it only if it's a Point.
             // TODO Handle GeometryCollection displaying name on the first Point
             // geometry.
-            if (feature.get('name')) {
-              var geom = feature.getGeometry();
-              if (geom instanceof ol.geom.Point ||
-                  geom instanceof ol.geom.MultiPoint) {
-                // Clone and set Name
-                var styles = feature.getStyleFunction().call(feature);
-                var style = styles[0];
-                var image = style.getImage();
-                if (style.getText() && image && image.getScale() === 0) {
+            if (hasPointGeometry) {
+              // Clone and set Name
+              var image = style.getImage();
+              var text = null;
+              if (feature.get('name') && style.getText()) {
+                if (image && image.getScale() == 0) {
                   image = gaStyleFactory.getStyle('transparentCircle');
                 }
+                text = new ol.style.Text({
+                  font: gaStyleFactory.FONT,
+                  text: feature.get('name'),
+                  fill: style.getText().getFill(),
+                  stroke: gaStyleFactory.getTextStroke(
+                      style.getText().getFill().getColor()),
+                  scale: style.getText().getScale()
+                });
+              } else if (gaNetworkStatus.offline) {
+                image = gaStyleFactory.getStyle('kml').getImage();
+              }
+              styles = [new ol.style.Style({
+                fill: style.getFill(),
+                stroke: style.getStroke(),
+                image: image,
+                text: text,
+                zIndex: style.getZIndex()
+              })];
+              feature.setStyle(styles);
+
+            } else {
+              // Remove the ol.style.Icon style when it is useless.
+              // TODO: fix in OL3? see
+              // https://github.com/openlayers/ol3/pull/3128
+             if (image instanceof ol.style.Icon) {
                 styles = [new ol.style.Style({
                   fill: style.getFill(),
                   stroke: style.getStroke(),
-                  image: image,
-                  text: new ol.style.Text({
-                    font: gaStyleFactory.FONT,
-                    text: feature.get('name'),
-                    fill: style.getText().getFill(),
-                    stroke: gaStyleFactory.getTextStroke(
-                        style.getText().getFill().getColor()),
-                    scale: style.getText().getScale()
-                  }),
+                  image: null,
+                  text: style.getText(),
                   zIndex: style.getZIndex()
                 })];
                 feature.setStyle(styles);
@@ -498,9 +545,8 @@
             features: features,
             attributions: attributions
           });
-
           var layerOptions = {
-            id: 'KML||' + options.url,
+            id: options.id,
             url: options.url,
             type: 'KML',
             label: options.label || kmlFormat.readName(kml) || 'KML',
@@ -536,15 +582,15 @@
         var addKmlLayer = function(olMap, data, options, index) {
           options.projection = olMap.getView().getProjection();
           var olLayer = createKmlLayer(data, options);
-
-          if (index) {
-            olMap.getLayers().insertAt(index, olLayer);
-          } else {
-            olMap.addLayer(olLayer);
-          }
-
-          if (options.zoomToExtent) {
-            olMap.getView().fitExtent(olLayer.getExtent(), olMap.getSize());
+          if (olLayer) {
+            if (index) {
+              olMap.getLayers().insertAt(index, olLayer);
+            } else {
+              olMap.addLayer(olLayer);
+            }
+            if (options.zoomToExtent) {
+              olMap.getView().fitExtent(olLayer.getExtent(), olMap.getSize());
+            }
           }
         };
 
@@ -553,20 +599,26 @@
         };
 
         this.addKmlToMapForUrl = function(map, url, layerOptions, index) {
-          layerOptions.url = url;
           var that = this;
-          $http.get(proxyUrl + encodeURIComponent(url)).success(function(data,
-              status, headers, config) {
-             var fileSize = headers('content-length');
-             if (that.isValidFileContent(data) &&
-                 that.isValidFileSize(fileSize)) {
-               if (layerOptions &&
-                   !angular.isDefined(layerOptions.useImageVector)) {
-                 layerOptions.useImageVector = that.useImageVector(fileSize);
-               }
-               addKmlLayer(map, data, layerOptions, index);
-             }
-          });
+          layerOptions = layerOptions || {};
+          layerOptions.url = url;
+          if (gaNetworkStatus.offline) {
+            addKmlLayer(map, null, layerOptions, index);
+          } else {
+            $http.get(proxyUrl + encodeURIComponent(url), {
+              cache: true
+            }).success(function(data, status, headers, config) {
+              var fileSize = headers('content-length');
+              if (that.isValidFileContent(data) &&
+                  that.isValidFileSize(fileSize)) {
+                layerOptions.useImageVector = that.useImageVector(fileSize);
+                addKmlLayer(map, data, layerOptions, index);
+              }
+            }).error(function() {
+              // Try to get offline data if exist
+              addKmlLayer(map, null, layerOptions, index);
+            });
+          }
         };
 
         // Defines if we should use a ol.layer.Image instead of a
@@ -592,6 +644,11 @@
             return false;
           }
           return true;
+        };
+
+        // Test if a layer is a KML layer
+        this.isKmlLayer = function(olLayer) {
+          return olLayer.type == 'KML';
         };
 
         this.proxyUrl = proxyUrl;
