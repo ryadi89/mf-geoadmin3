@@ -121,6 +121,42 @@
       'transparentCircle': transparentCircle
     };
 
+
+    // Defines feature style functions
+    var slctFeatStyleFunc = function(res) {
+      var geom = this.getGeometry();
+      if (!(geom instanceof ol.geom.GeometryCollection)) {
+        var extent = geom.getExtent();
+        var max = Math.max(extent[2] - extent[0], extent[3] - extent[1]);
+        if (max / res < 45) {
+          selectStyle.setGeometry(new ol.geom.Point(
+              geom.getFirstCoordinate()));
+          return [selectStyle];
+        }
+      }
+      selectStyle.setGeometry(geom);
+      return [selectStyle];
+    };
+
+    var hlFeatStyleFunc = function(res) {
+      var geom = this.getGeometry();
+      if (!(geom instanceof ol.geom.GeometryCollection)) {
+        var extent = geom.getExtent();
+        var max = Math.max(extent[2] - extent[0], extent[3] - extent[1]);
+        if (max / res < 45) {
+          hlStyle.setGeometry(new ol.geom.Point(geom.getFirstCoordinate()));
+          return [hlStyle];
+        }
+      }
+      hlStyle.setGeometry(geom);
+      return [hlStyle];
+    };
+
+    var featStyleFunctions = {
+      'select': slctFeatStyleFunc,
+      'highlight': hlFeatStyleFunc
+    };
+
     this.$get = function() {
       return {
         // Rules for the z-index (useful for a correct selection):
@@ -141,11 +177,13 @@
         getStyle: function(type) {
           return styles[type];
         },
-        getStyleFunction: function(type) {
-          return function(feature, resolution) {
-            return styles[feature.get('styleId')];
+
+        getFeatureStyleFunction: function(type) {
+          return featStyleFunctions[type] || function(resolution) {
+            return styles[type];
           };
         },
+
         // Defines a text stroke (white or black) depending on a text color
         getTextStroke: function(olColor) {
           var stroke = new ol.style.Stroke({
